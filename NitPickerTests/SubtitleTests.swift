@@ -15,7 +15,10 @@ private func cue(_ start: Double, _ end: Double, _ text: String = "x") -> Subtit
     }
 
     @Test func rejectsGarbage() {
-        for text in ["", "abc", "1", "00:61:00,000", "00:00:61,000", "00:00:01,x", "00:00:01,", "-1:00:00,000", "1:2:3:4"] {
+        for text in [
+            "", "abc", "1", "00:61:00,000", "00:00:61,000", "00:00:01,x", "00:00:01,", "-1:00:00,000", "1:2:3:4",
+            "9223372036854775807:00:00,000", "100000:00:00,000",
+        ] {
             #expect(SubtitleTimestamp.parse(text) == nil, "\(text)")
         }
     }
@@ -446,6 +449,11 @@ private func cue(_ start: Double, _ end: Double, _ text: String = "x") -> Subtit
     @Test func honoursACustomFormatLine() {
         let custom = "[Events]\nFormat: Marked, Start, End, Text\nDialogue: Marked=0,0:00:01.00,0:00:02.00,Hi there"
         #expect(ASSParser.parse(custom).map(\.text) == ["Hi there"])
+    }
+
+    @Test func skipsAFormatWithTheTimesAfterTheText() {
+        let crafted = "[Events]\nFormat: Text, Start, End\nDialogue: hello,0:00:01.00,0:00:02.00"
+        #expect(ASSParser.parse(crafted).isEmpty)
     }
 
     @Test func loadsThroughTheLoaderAndIgnoresOtherSections() throws {
