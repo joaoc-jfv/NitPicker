@@ -26,8 +26,9 @@ This document is the full build plan. It is written so that an engineer (or anot
 | 3.2 mpv polish: subtitles, thumbnails, Dolby Vision note | **Done** (see 3.2 notes). |
 | 3.3 real-file checks, compatibility switch, resize fix | **Done** (see 3.3 notes). |
 | 4.1 folder playlists, 4.2 black bars, 4.3 picture adjustments, 4.4 screenshots, 4.5 DMG script | **Done** (see the notes under §7 Phase 4). |
+| Security and bug review (October 2026) | **Done** (see the review notes after the 4.5 notes). |
 
-387 tests pass (`xcodebuild … test`). The Release app is 94 MB (universal binary; before libmpv it was 41 MB) and the disk image 43 MB. One commit per milestone; `git log` is the history.
+400 tests pass (`xcodebuild … test`). The Release app is 94 MB (universal binary; before libmpv it was 41 MB) and the disk image 43 MB. One commit per milestone; `git log` is the history.
 
 ### To start a session
 1. Read `CLAUDE.md`, this section, §7 Phase 2, and `Spikes/MKVRemux/README.md`.
@@ -60,7 +61,7 @@ This document is the full build plan. It is written so that an engineer (or anot
 ### Decisions that belong to the owner
 - **License for Nit Picker: decided, MIT** (§9 item 7). Public repo, free for now; premium features may come later as a closed module (open core), which MIT allows because the owner holds the copyright. Don't copy GPL code (IINA, mpv) into the app, and stay on MPVKit's LGPL variant. Still open: the name check (§9 item 6).
 - "Dolby Vision" is used as the descriptive name (decided in 1.9, one place: `HDRFormat.badge`). "Dolby Atmos" is never shown; a test checks it.
-- FFmpeg and libmpv come from MPVKit's release assets, whose README says it is lightly maintained. `Packages/FFmpegKit` now depends on the `MPVKit` package (LGPL variant, pinned to 1.1.0-n9.0.2) and links its static libraries explicitly. AetherEngine (a library that already does this whole job) is the fallback or reference.
+- FFmpeg and libmpv come from MPVKit's release assets, whose README says it is lightly maintained. `Packages/FFmpegKit` now depends on the `MPVKit` package (LGPL variant, release 1.1.0-n9.0.2, pinned by its commit hash because a tag can move) and links its static libraries explicitly. AetherEngine (a library that already does this whole job) is the fallback or reference.
 
 ### Gotchas learned the hard way
 - **`project.yml` is the source of truth** for the Xcode project, the Info.plist and the **entitlements**. XcodeGen rewrites `NitPicker.entitlements` from `entitlements.properties`; for milestones 1.1–1.5 it was regenerated empty and the app ran unsandboxed. Run `xcodegen generate` after adding or removing files.
@@ -68,6 +69,7 @@ This document is the full build plan. It is written so that an engineer (or anot
 - Sandbox: both `network.server` and `network.client` are needed for the loopback server (verified). The sandbox is enforced for network here.
 - AVFoundation can't describe HLS tracks (see 2.2 notes); `AVAssetResourceLoader` can't feed HLS media.
 - libavformat parses Matroska Cues lazily (first seek); the muxer needs `strict unofficial` for the Dolby Vision box and `delay_moov` for `dec3`. The details are in the spike README.
+- **Open media through `FFmpegInput.open`**, never `avformat_open_input` directly: it allows local files only (`protocol_whitelist=file`), the remuxer's readers pass `remuxFormats` so a manifest or concat list posing as an MKV is refused, and `SegmentMuxer` passes an interrupt so `close` can stop a read. Timestamps from a file go through `FFmpegTimestamp.seconds`, which turns nonsense into nil instead of a crash. The mpv options `access-references=no` and `demuxer-lavf-o=protocol_whitelist=[file]` keep libmpv off the network (see the review notes).
 - Linking FFmpeg statically needs its dependencies (gmp, gnutls, nettle, hogweed, dav1d, uavs3d, lcms2) linked explicitly in `Packages/FFmpegKit/Package.swift`.
 - Swift Testing runs tests in parallel; tests that touch `UserDefaults` use throwaway suites (`TestPreferences`, `PlayerServices.testing`). `FakeEngine` (tests) scripts a `PlaybackEngine`.
 - **Checking the real app**: `open -a <app> <file>`, then System Events scripting (`osascript`) for keys, menus and window geometry, `screencapture -R x,y,w,h` of the window, and `CGEvent` for real clicks (a tiny Swift tool; `System Events` clicks don't register as double-clicks). It only works while the Mac is unlocked. A stale "Nit Picker quit unexpectedly" dialog after a crashing test run is harmless; check `~/Library/Logs/DiagnosticReports/NitPicker*.ips` for real crashes.
@@ -465,7 +467,18 @@ Each milestone ends with a working, runnable app. Commit at the end of each mile
 - `scripts/make-dmg.sh` runs `xcodegen`, builds the Release app into `build/DerivedData`, verifies its signature, makes `build/NitPicker-<version>.dmg` (the app and an Applications link, compressed) and, with `--identity "Developer ID Application: …" --team ID` signs with a timestamp and the hardened runtime, and with `--notary-profile name` submits to Apple, waits, staples and checks with `spctl`. Run without options it signs as Xcode would here (ad hoc, hardened runtime flag set), which is for trying, not for sharing.
 - **GitHub releases.** The README's download link is `releases/latest/download/NitPicker.dmg`, so each release needs an asset with exactly that name: `cp build/NitPicker-<version>.dmg build/NitPicker.dmg && gh release create v<version> build/NitPicker.dmg --title "Nit Picker <version>" --notes-file …`. v0.1.0 was published this way with the ad-hoc-signed image from this script, and its notes and the README explain "Open Anyway", since Gatekeeper blocks an un-notarized download. A notarized image removes that step; then drop the paragraph about it.
 - **Run here:** the unsigned path end to end. The Release app builds, `codesign --verify --deep --strict` passes, the image mounts, holds a universal (arm64 + x86_64) 94 MB app, and the Release build launches and plays the real 4K file. **Not run:** the Developer ID signing and the notarization (no such identity or profile here), so the first real release should be done by hand once with the script's output watched; embedded frameworks (MPVKit's `Lib*` frameworks are copied into the app) must all be signed with the same identity, which Xcode does when it embeds them.
+- With `--notary-profile`, the app itself is notarized and stapled before it goes into the image (then the image is), so a copy dragged out of the image passes Gatekeeper offline too. Not run here either (no profile).
 - Not built, because each needs something only the owner can create: subtitle downloads (OpenSubtitles API: an API key and consent screens), Sparkle updates (an EdDSA key and a place to host the appcast), the website.
+
+Review notes (October 2026, a security and bug pass over the whole app; the findings and their fixes are listed in the review commit's message):
+- **Subtitle parsers**: an ASS `Format:` line with the times after `Text`, and a timestamp with an enormous hours value, crashed the app, and sidecar files load by themselves. Both are rejected now. Subtitle files over 20 MB are refused, and an inline tag must close within 256 characters, so a line full of `<` can't stall drawing.
+- **libmpv and the network**: the sandbox allows outgoing connections (the loopback server needs them), and mpv followed a playlist or an HLS manifest saved as `.avi` to an http address. Verified with a listener on loopback (`MPVNetworkTests`): it was reached before, and isn't with `access-references=no`, `load-unsafe-playlists=no` and `demuxer-lavf-o=protocol_whitelist=[file]`. Normal playback is unchanged; files that pull in other files (EDL, ordered chapters in another file, playlists) no longer do.
+- **libavformat**: every open goes through `FFmpegInput` (see the gotchas). FFmpeg's own default already kept a local file from reaching http; the whitelist makes that explicit. The remuxer's whitelist still lets a mislabelled MP4 open.
+- **Opening files**: an open that is overtaken while its engine is still loading no longer hands its failure to the compatibility engine by closing the *new* file's engine (reproduced with `FakeEngine` before the fix). Drops and Finder only open local files, not web links or folders.
+- **Closing a remuxed file** no longer waits on the main thread for a segment cut: `SegmentMuxer.close` raises an interrupt that libavformat polls and finishes on its queue.
+- **mpv teardown**: `MPVHandle.destroy` no longer frees the handle while the event thread may still be waiting on it; if the thread doesn't stop within 10 s the instance is leaked rather than freed. Raw screenshots check the buffer size against stride × height; a seek's 3 s timeout only releases that seek.
+- Smaller: a black-bar run overtaken by the next file no longer clears the next run's flag; screenshot names are cut to 200 bytes (emoji titles) and written without overwriting; the loopback server checks segment indexes are not negative.
+- Not verified: that the interrupt really cuts short a read from a slow disk (the test shows `close` doesn't wait, not how fast a read gives up); the mpv teardown timeout path (it needs a hung mpv).
 
 ---
 

@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Network
 import Testing
 @testable import NitPicker
 
@@ -555,5 +556,108 @@ extension MPVSubtitleTests {
         #expect(handle.double("brightness") == 100, "clamped to mpv's range")
         engine.setVideoAdjustments(VideoAdjustments())
         #expect(handle.double("brightness") == 0 && handle.double("contrast") == 0 && handle.double("saturation") == 0)
+    }
+}
+
+/// A local file must not make the compatibility engine reach the network: the sandbox allows outgoing connections (for the
+/// loopback HLS server), so a playlist or an HLS manifest disguised as a video could otherwise call an attacker's server.
+@MainActor
+@Suite(.serialized) struct MPVNetworkTests {
+    /// Counts the connections made to a listener on the loopback address.
+    final class Tripwire: @unchecked Sendable {
+        private let listener: NWListener
+        private let hits = Counter()
+        let port: UInt16
+
+        init() async throws {
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
+            listener = try NWListener(using: parameters)
+            let listener = listener, hits = hits
+            port = try await withCheckedThrowingContinuation { continuation in
+                let resumed = Resumed()
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: if resumed.take() { continuation.resume(returning: listener.port?.rawValue ?? 0) }
+                    case .failed(let error), .waiting(let error): if resumed.take() { continuation.resume(throwing: error) }
+                    default: break
+                    }
+                }
+                listener.newConnectionHandler = { connection in
+                    hits.increment()
+                    connection.cancel()
+                }
+                listener.start(queue: DispatchQueue(label: "nitpicker.tests.tripwire"))
+            }
+        }
+
+        var connections: Int { hits.value }
+
+        private final class Counter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var count = 0
+            func increment() { lock.withLock { count += 1 } }
+            var value: Int { lock.withLock { count } }
+        }
+
+        private final class Resumed: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func take() -> Bool { lock.withLock { defer { done = true }; return !done } }
+        }
+        func stop() { listener.cancel() }
+    }
+
+    private func open(_ contents: String, tripwire: Tripwire) async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("nitpicker-reference-\(UUID().uuidString).avi")
+        try Data(contents.utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = MPVEngine()
+        defer { engine.close() }
+        try? await engine.load(file, startAt: nil)
+        try await Task.sleep(for: .seconds(2))
+    }
+
+    @Test func aPlaylistDisguisedAsAVideoDoesNotReachTheNetwork() async throws {
+        let tripwire = try await Tripwire()
+        defer { tripwire.stop() }
+        try await open("#EXTM3U\nhttp://127.0.0.1:\(tripwire.port)/movie.mp4\n", tripwire: tripwire)
+        #expect(tripwire.connections == 0)
+    }
+
+    @Test func anHLSManifestDisguisedAsAVideoDoesNotReachTheNetwork() async throws {
+        let tripwire = try await Tripwire()
+        defer { tripwire.stop() }
+        let manifest = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nhttp://127.0.0.1:\(tripwire.port)/segment.ts\n#EXT-X-ENDLIST\n"
+        try await open(manifest, tripwire: tripwire)
+        #expect(tripwire.connections == 0)
+    }
+
+    @Test func mpvAcceptedTheOptionsThatKeepItOffTheNetwork() async throws {
+        // `MPVHandle` skips options mpv refuses, so check that these really took.
+        let file = try LegacyFixture.makeMPEG4(seconds: 2)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = MPVEngine()
+        try await engine.load(file, startAt: nil)
+        defer { engine.close() }
+        let handle = try #require(engine.handleForTesting)
+        #expect(handle.flag("access-references") == false)
+        #expect(handle.flag("load-unsafe-playlists") == false)
+        #expect(handle.string("demuxer-lavf-o")?.contains("protocol_whitelist=file") == true, "\(String(describing: handle.string("demuxer-lavf-o")))")
+    }
+
+    @Test func readingTheFileOurselvesDoesNotReachTheNetworkEither() async throws {
+        // The info panel's HDR probe and the scrub thumbnails open the file with libavformat directly, outside mpv. FFmpeg's own
+        // default for a local file already refuses http; `FFmpegInput` says so explicitly, and this keeps it that way.
+        let tripwire = try await Tripwire()
+        defer { tripwire.stop() }
+        let manifest = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nhttp://127.0.0.1:\(tripwire.port)/segment.ts\n#EXT-X-ENDLIST\n"
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("nitpicker-manifest-\(UUID().uuidString).avi")
+        try Data(manifest.utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        _ = await Task.detached { MPVSourceProbe.hdrFormat(atPath: file.path) }.value
+        _ = await MPVThumbnailer(path: file.path).thumbnail(at: .zero, maxSize: CGSize(width: 64, height: 64))
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(tripwire.connections == 0)
     }
 }

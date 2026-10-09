@@ -1,3 +1,4 @@
+import FFmpegKit
 import Foundation
 import Testing
 @testable import NitPicker
@@ -7,6 +8,29 @@ import Testing
         #expect(FFmpegInfo.version.hasPrefix("libavformat 6"))
         #expect(FFmpegInfo.license.contains("LGPL"))
         #expect(!FFmpegInfo.license.contains("GPL version 2"))
+    }
+}
+
+@Suite struct FFmpegInputTests {
+    @Test func turnsTimestampsIntoSecondsOnlyWhenTheyMakeSense() {
+        #expect(FFmpegTimestamp.seconds(1500, timeBase: AVRational(num: 1, den: 1000)) == 1.5)
+        #expect(FFmpegTimestamp.seconds(-500, timeBase: AVRational(num: 1, den: 1000)) == -0.5)
+        #expect(FFmpegTimestamp.seconds(Int64.min, timeBase: AVRational(num: 1, den: 1000)) == nil, "no timestamp")
+        #expect(FFmpegTimestamp.seconds(10, timeBase: AVRational(num: 0, den: 1000)) == nil)
+        #expect(FFmpegTimestamp.seconds(10, timeBase: AVRational(num: 1, den: 0)) == nil)
+        #expect(FFmpegTimestamp.seconds(Int64.max, timeBase: AVRational(num: 1, den: 1)) == nil, "too far to be real")
+    }
+
+    @Test func theRemuxerOpensNeitherManifestsNorConcatListsPosingAsMatroska() throws {
+        for (name, contents) in [
+            ("hls", "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment.ts\n#EXT-X-ENDLIST\n"),
+            ("concat", "ffconcat version 1.0\nfile 'other.mkv'\n"),
+        ] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("nitpicker-\(name)-\(UUID().uuidString).mkv")
+            try Data(contents.utf8).write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            #expect(throws: MKVProbe.Failure.self, "\(name)") { try MKVProbe.probe(path: url.path) }
+        }
     }
 }
 

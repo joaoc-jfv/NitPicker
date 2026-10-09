@@ -11,6 +11,9 @@ enum SubtitleMarkup {
         var underline = false
     }
 
+    /// Tags are short; a `<` with no `>` this close is text. The bound also keeps a line full of `<` from taking quadratic time.
+    static let longestTag = 256
+
     static func runs(from raw: String) -> [Run] {
         let text = raw.replacingOccurrences(of: #"\{\\[^}]*\}"#, with: "", options: .regularExpression)
         var runs: [Run] = []
@@ -26,7 +29,7 @@ enum SubtitleMarkup {
         var index = text.startIndex
         while index < text.endIndex {
             let character = text[index]
-            if character == "<", let close = text[index...].firstIndex(of: ">"),
+            if character == "<", let close = text[index...].prefix(Self.longestTag).firstIndex(of: ">"),
                let tag = tagName(String(text[text.index(after: index)..<close])) {
                 flushBuffer()
                 let adjust = tag.closing ? -1 : 1

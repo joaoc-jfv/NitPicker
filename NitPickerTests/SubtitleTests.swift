@@ -182,6 +182,14 @@ private func cue(_ start: Double, _ end: Double, _ text: String = "x") -> Subtit
         #expect(SubtitleMarkup.plainText(from: "</i>text<i>") == "text")
         #expect(String(SubtitleMarkup.attributedString(from: "<i>a</i>b").characters) == "ab")
     }
+
+    @Test func aLineFullOfOpenBracketsStaysTextAndStaysQuick() {
+        let line = String(repeating: "<a", count: 50_000)
+        let started = ContinuousClock.now
+        #expect(SubtitleMarkup.plainText(from: line) == line)
+        #expect(ContinuousClock.now - started < .seconds(2))
+        #expect(SubtitleMarkup.runs(from: "<i>shown</i>").first?.italic == true, "real tags still work")
+    }
 }
 
 @Suite struct SubtitleCueListTests {
@@ -462,5 +470,12 @@ private func cue(_ start: Double, _ end: Double, _ text: String = "x") -> Subtit
         try file.write(to: url, atomically: true, encoding: .utf8)
         #expect(try SubtitleLoader.load(from: url).cues.count == 2)
         #expect(ASSParser.parse("[Script Info]\nTitle: nothing").isEmpty)
+    }
+
+    @Test func refusesAFileTooBigToBeSubtitles() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nitpicker-\(UUID().uuidString).srt")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(count: SubtitleLoader.maximumFileSize + 1).write(to: url)
+        #expect(throws: SubtitleLoader.LoadError.tooLarge) { try SubtitleLoader.load(from: url) }
     }
 }

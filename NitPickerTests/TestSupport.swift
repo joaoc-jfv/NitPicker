@@ -94,9 +94,19 @@ final class FakeEngine: PlaybackEngine {
     var loadError: (any Error)?
     private(set) var loadedURLs: [URL] = []
 
+    /// When set, `load` waits for `releaseLoad()` before it finishes (a slow file).
+    var holdsLoad = false
+    private var heldLoad: CheckedContinuation<Void, Never>?
+    var isHoldingLoad: Bool { heldLoad != nil }
+    func releaseLoad() {
+        heldLoad?.resume()
+        heldLoad = nil
+    }
+
     func load(_ url: URL, startAt: Duration?) async throws {
         loadedURLs.append(url)
         loadedStarts.append(startAt)
+        if holdsLoad { await withCheckedContinuation { heldLoad = $0 } }
         if let loadError { throw loadError }
         emit(.durationChanged(duration))
         emit(.mediaInfoChanged(info))
@@ -125,8 +135,12 @@ final class FakeEngine: PlaybackEngine {
     }
     func selectAudio(_ track: MediaTrack?) { selectedAudioTrack = track }
     func selectSubtitle(_ track: MediaTrack?) { selectedSubtitleTrack = track }
+    /// How long each still takes; the wait doesn't end early when the caller is cancelled (like a decode in progress).
+    var thumbnailDelay: Duration?
+
     func thumbnail(at time: Duration, maxSize: CGSize) async -> CGImage? {
         thumbnailRequests.append(time)
+        if let thumbnailDelay { await Task.detached { try? await Task.sleep(for: thumbnailDelay) }.value }
         return thumbnailImage
     }
     func togglePictureInPicture() {

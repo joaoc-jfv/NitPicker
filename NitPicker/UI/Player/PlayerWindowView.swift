@@ -72,7 +72,7 @@ struct PlayerWindowView: View {
             if !visible { NSCursor.setHiddenUntilMouseMoves(true) }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first else { return false }
+            guard let url = urls.first, PlayerModel.canOpen(url) else { return false }
             player.open(url)
             return true
         } isTargeted: { isDropTargeted = $0 }

@@ -147,6 +147,29 @@ enum BarImage {
         #expect(abs(placement.clipRect.width - 1600) < 0.5 && abs(placement.clipRect.height - 800) < 0.5 && abs(placement.clipRect.minY - 50) < 0.5)
         #expect(VideoLayout.label(forRatio: 2.3529) == "2.35:1")
     }
+
+    @Test func aRunOvertakenByTheNextFileLeavesTheNextFilesRunGoing() async {
+        final class Engines { var all: [FakeEngine] = [] }
+        let engines = Engines(), image = BarImage.make(top: 0.128, bottom: 0.128)
+        let model = PlayerModel(services: .testing(), engineFactory: { _ in
+            let engine = FakeEngine()
+            engine.thumbnailImage = image
+            engine.thumbnailDelay = .milliseconds(600)
+            engines.all.append(engine)
+            return engine
+        })
+        defer { model.close() }
+        model.open(URL(fileURLWithPath: "/Movies/one.mp4"))
+        await waitUntil("the first file") { model.state == .playing && model.duration > .zero }
+        model.detectBlackBars()
+        #expect(model.isDetectingBlackBars)
+
+        model.open(URL(fileURLWithPath: "/Movies/two.mp4"))  // the first run is cancelled but its still is still decoding
+        await waitUntil("the second file") { engines.all.count == 2 && model.state == .playing && model.duration > .zero }
+        model.detectBlackBars()
+        try? await Task.sleep(for: .milliseconds(900))  // the first run has woken up and ended by now
+        #expect(model.isDetectingBlackBars, "the second file's run is still looking")
+    }
 }
 
 @MainActor
