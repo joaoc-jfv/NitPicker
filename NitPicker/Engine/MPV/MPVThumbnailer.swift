@@ -68,8 +68,7 @@ final class MPVThumbnailer: @unchecked Sendable {
         if opened { return true }
         guard !failedToOpen, !closed else { return false }
         failedToOpen = true
-        var input: UnsafeMutablePointer<AVFormatContext>?
-        guard avformat_open_input(&input, path, nil, nil) >= 0, let input else { return false }
+        guard let input = try? FFmpegInput.open(path: path) else { return false }
         format = input
         guard avformat_find_stream_info(input, nil) >= 0 else { return false }
         let index = av_find_best_stream(input, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)

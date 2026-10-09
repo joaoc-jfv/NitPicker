@@ -4,6 +4,7 @@ import Testing
 
 private struct EngineBoom: Error, LocalizedError {
     var errorDescription: String? { "The engine could not start." }
+
 }
 
 @MainActor
@@ -54,6 +55,27 @@ private struct EngineBoom: Error, LocalizedError {
         #expect(player.mediaInfo?.engineName == "mpv (compatibility mode)")
         #expect(first.closed && !second.closed)
         #expect(player.errorMessage == nil)
+    }
+
+    @Test func aSlowFileThatGivesUpAfterTheNextOneOpenedLeavesTheNextOneAlone() async {
+        // The first file is still loading when the user opens another; only then does its engine give up.
+        let slow = FakeEngine(), next = FakeEngine(), compatibility = FakeEngine()
+        slow.holdsLoad = true
+        slow.loadError = PlaybackError.needsCompatibilityMode
+        let first = URL(fileURLWithPath: "/Movies/slow.mkv"), second = URL(fileURLWithPath: "/Movies/next.mp4")
+        let player = PlayerModel(
+            services: .testing(), engineFactory: { $0 == first ? slow : next }, compatibilityFactory: { _ in compatibility }
+        )
+        defer { player.close() }
+        player.open(first)
+        await waitUntil("the first load to start") { slow.isHoldingLoad }
+        player.open(second)
+        await waitUntil("the second file playing") { player.state == .playing }
+        slow.releaseLoad()
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(!next.closed, "the second file's engine is still the one playing")
+        #expect(compatibility.loadedURLs.isEmpty, "the abandoned file isn't handed to the compatibility engine")
+        #expect(player.currentURL == second && player.state == .playing)
     }
 
     @Test func aFileAVFoundationCannotOpenIsRetriedToo() async {
@@ -131,5 +153,12 @@ private struct EngineBoom: Error, LocalizedError {
         player.open(url)
         await waitUntil("playback") { player.state == .playing }
         #expect(player.errorMessage == nil)
+    }
+
+    @Test func opensLocalFilesButNotWebLinksOrFolders() {
+        #expect(PlayerModel.canOpen(URL(fileURLWithPath: "/Movies/film.mkv")))
+        #expect(!PlayerModel.canOpen(URL(string: "https://example.com/film.mp4")!))
+        #expect(!PlayerModel.canOpen(FileManager.default.temporaryDirectory))
+        #expect(!PlayerModel.canOpen(URL(fileURLWithPath: NSTemporaryDirectory())), "a folder even without its trailing slash")
     }
 }

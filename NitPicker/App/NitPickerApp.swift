@@ -10,7 +10,7 @@ struct NitPickerApp: App {
         Window("Nit Picker", id: "main") {
             PlayerWindowView()
                 .environment(player)
-                .onOpenURL { player.open($0) }
+                .onOpenURL { url in if PlayerModel.canOpen(url) { player.open(url) } }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     player.saveResumePosition()
                 }

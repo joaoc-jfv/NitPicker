@@ -107,12 +107,16 @@ final class PlayerModel {
     @ObservationIgnored private var sidecarTask: Task<Void, Never>?
     @ObservationIgnored private var engine: (any PlaybackEngine)?
     @ObservationIgnored private var openTask: Task<Void, Never>?
+    /// Bumped by every open and close, so an open that was overtaken can tell it no longer owns the engine.
+    @ObservationIgnored private var openGeneration = 0
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var scopedURL: URL?
     @ObservationIgnored private var folderScope: URL?
     @ObservationIgnored private var dismissedUpNext: URL?
     @ObservationIgnored private var playlistTask: Task<Void, Never>?
     @ObservationIgnored private var blackBarTask: Task<Void, Never>?
+    /// Bumped by every black-bar run and teardown, so only the latest run clears `isDetectingBlackBars`.
+    @ObservationIgnored private var blackBarRun = 0
     /// How long before the end the "Up next" card shows.
     @ObservationIgnored var upNextLeadTime: Duration = .seconds(15)
     @ObservationIgnored private var hideTask: Task<Void, Never>?
@@ -149,6 +153,12 @@ final class PlayerModel {
 
     // MARK: Opening
 
+    /// Whether `url` is something the user can hand the player (a drop, Finder): a local file, not a web link or a folder.
+    nonisolated static func canOpen(_ url: URL) -> Bool {
+        guard url.isFileURL, !url.hasDirectoryPath else { return false }
+        return (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory != true
+    }
+
     func open(_ url: URL, startAt: Duration? = nil, compatibility: Bool = false) {
         openTask?.cancel()
         openTask = Task { await performOpen(url, startAt: startAt, compatibility: compatibility) }
@@ -162,11 +172,14 @@ final class PlayerModel {
 
     func close() {
         openTask?.cancel()
+        openGeneration += 1
         teardown()
         currentURL = nil
     }
 
     private func performOpen(_ url: URL, startAt: Duration?, compatibility: Bool) async {
+        openGeneration += 1
+        let generation = openGeneration
         teardown()
         currentURL = url
         state = .loading
@@ -180,6 +193,8 @@ final class PlayerModel {
             do {
                 try await engine.load(url, startAt: startAt)
             } catch let error as PlaybackError where error.wantsCompatibilityEngine {
+                // A newer open (or a close) has taken over; the engine in use is no longer this file's.
+                guard !Task.isCancelled, generation == openGeneration else { throw CancellationError() }
                 // The first engine can't play this file; libmpv may be able to.
                 discardEngine()
                 engine = try compatibilityFactory(url)
@@ -187,6 +202,7 @@ final class PlayerModel {
                 try await engine.load(url, startAt: startAt)
             }
             try Task.checkCancellation()
+            guard generation == openGeneration else { throw CancellationError() }
             applyTrackPreferences(to: engine)
             engine.play()
             services.recents.note(url)
@@ -287,6 +303,7 @@ final class PlayerModel {
         folderScope = nil
         playlistTask?.cancel()
         blackBarTask?.cancel()
+        blackBarRun += 1
         isDetectingBlackBars = false
         playlist = nil
         upNext = nil
@@ -937,12 +954,15 @@ extension PlayerModel {
     func detectBlackBars(announce: Bool = true) {
         guard let engine, duration > .zero, !isDetectingBlackBars else { return }
         blackBarTask?.cancel()
+        blackBarRun += 1
+        let run = blackBarRun
         isDetectingBlackBars = true
         if announce { showToast("Looking for black bars…", symbol: "crop") }
         let length = duration
         let size = mediaInfo?.presentationSize ?? .zero
         blackBarTask = Task {
-            defer { isDetectingBlackBars = false }
+            // A run overtaken by a newer one (after the file changed) must not clear the newer run's flag.
+            defer { if run == blackBarRun { isDetectingBlackBars = false } }
             var stills: [BlackBarDetector.Bars?] = []
             for step in 1...10 {
                 guard !Task.isCancelled else { return }

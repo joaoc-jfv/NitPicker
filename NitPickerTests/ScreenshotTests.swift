@@ -13,6 +13,9 @@ import Testing
         #expect(ScreenshotStore.safeName("A/B: C\\D") == "A B C D")
         #expect(ScreenshotStore.safeName("  .. ") == "Screenshot")
         #expect(ScreenshotStore.safeName(String(repeating: "x", count: 200)).count == 80)
+        // Eighty family emoji are far more than a file name's 255 bytes.
+        let family = ScreenshotStore.safeName(String(repeating: "👨‍👩‍👧‍👦", count: 80))
+        #expect(family.utf8.count <= ScreenshotStore.maximumNameBytes && !family.isEmpty)
     }
 
     @MainActor
@@ -25,6 +28,8 @@ import Testing
         let second = try store.save(output, title: "Film", at: .seconds(65))
         #expect(first.lastPathComponent == "Film 1-05.png" && second.lastPathComponent == "Film 1-05 2.png")
         #expect(try Data(contentsOf: first) == Data([1, 2, 3]))
+        let long = try store.save(output, title: String(repeating: "👨‍👩‍👧‍👦", count: 80), at: .seconds(65))
+        #expect(FileManager.default.fileExists(atPath: long.path))
     }
 
     @MainActor

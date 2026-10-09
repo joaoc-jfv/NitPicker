@@ -47,9 +47,8 @@ enum MKVSubtitleReader {
         path: String, streams: [ProbedStream], progress: @Sendable ([Int: SubtitleCueList]) -> Void
     ) throws {
         guard !streams.isEmpty else { return }
-        var opened: UnsafeMutablePointer<AVFormatContext>?
-        let code = avformat_open_input(&opened, path, nil, nil)
-        guard code >= 0, let context = opened else { throw MKVProbe.Failure.cannotOpen(message(for: code)) }
+        let context = try MKVProbe.open(path)
+        var opened: UnsafeMutablePointer<AVFormatContext>? = context
         defer { avformat_close_input(&opened) }
 
         let codecs = Dictionary(uniqueKeysWithValues: streams.map { ($0.id, $0.codec) })
@@ -78,10 +77,13 @@ enum MKVSubtitleReader {
                   let data = packet.pointee.data
             else { continue }
             let pts = packet.pointee.pts != noPTS ? packet.pointee.pts : packet.pointee.dts
-            guard pts != noPTS else { continue }
-            let timeBase = av_q2d(stream.pointee.time_base)
-            let start = Duration.seconds(max(0, Double(pts) * timeBase))
-            let length = packet.pointee.duration > 0 ? Duration.seconds(Double(packet.pointee.duration) * timeBase) : defaultCueDuration
+            guard let seconds = FFmpegTimestamp.seconds(pts, timeBase: stream.pointee.time_base),
+                  // A subtitle line is a few hundred bytes; anything far bigger isn't one worth drawing.
+                  packet.pointee.size <= maximumPacketSize
+            else { continue }
+            let start = Duration.seconds(max(0, seconds))
+            let length = FFmpegTimestamp.seconds(packet.pointee.duration, timeBase: stream.pointee.time_base)
+                .flatMap { $0 > 0 ? Duration.seconds($0) : nil } ?? defaultCueDuration
             guard let text = text(fromPacket: Array(UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))), codec: codec) else { continue }
             cues[index, default: []].append(SubtitleCue(start: start, end: start + length, text: text))
             changed.insert(index)
@@ -90,11 +92,7 @@ enum MKVSubtitleReader {
         report()
     }
 
-    private static func message(for code: Int32) -> String {
-        var buffer = [CChar](repeating: 0, count: 256)
-        av_strerror(code, &buffer, buffer.count)
-        return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
-    }
+    static let maximumPacketSize: Int32 = 64 * 1024
 }
 
 /// Cue lists the scan has found so far, safe to read from the main actor while the scan writes from its own thread.

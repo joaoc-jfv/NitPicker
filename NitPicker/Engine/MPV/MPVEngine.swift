@@ -17,7 +17,9 @@ final class MPVEngine: PlaybackEngine {
     private var thumbnailer: MPVThumbnailer?
     private var consuming: Task<Void, Never>?
     private var loadWaiter: CheckedContinuation<Void, any Error>?
-    private var restartWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Seeks waiting for mpv to show the new position, by seek number.
+    private var restartWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var seekCount = 0
     private(set) var lastErrorLog: String?
     private static let log = Logger(subsystem: "com.joaocadide.nitpicker", category: "mpv")
 
@@ -127,6 +129,9 @@ final class MPVEngine: PlaybackEngine {
             ("ytdl", "no"), ("osc", "no"), ("osd-level", "0"), ("input-default-bindings", "no"), ("input-vo-keyboard", "no"),
             ("keep-open", "yes"), ("pause", "yes"), ("sub-auto", "no"), ("audio-display", "no"), ("load-scripts", "no"),
             ("save-position-on-quit", "no"), ("volume-max", "100"), ("target-colorspace-hint", hdr ? "yes" : "no"),
+            // A local file must not lead to the network, which the sandbox allows for the loopback server: no following of
+            // playlists, EDL or linked files, and libavformat (an HLS manifest posing as a video) opens local files only.
+            ("access-references", "no"), ("load-unsafe-playlists", "no"), ("demuxer-lavf-o", "protocol_whitelist=[file]"),
         ]
         if let audioLanguage { options.append(("alang", audioLanguage)) }
         return options
@@ -309,13 +314,16 @@ final class MPVEngine: PlaybackEngine {
     func seek(to time: Duration, precise: Bool) async {
         guard let mpv, isLoaded else { return }
         let mode = precise ? "absolute+exact" : "absolute+keyframes"
+        seekCount += 1
+        let seek = seekCount
         await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
-            restartWaiters.append(waiter)
-            if mpv.command(["seek", "\(max(0, time.seconds))", mode]) != nil { resumeRestartWaiters() }
-            // A seek that never reports back (past the end, say) must not hang the caller.
+            restartWaiters[seek] = waiter
+            if mpv.command(["seek", "\(max(0, time.seconds))", mode]) != nil { resumeRestartWaiter(seek) }
+            // A seek that never reports back (past the end, say) must not hang the caller. Only this seek: a later one
+            // still waits for its own restart.
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(3))
-                self?.resumeRestartWaiters()
+                self?.resumeRestartWaiter(seek)
             }
         }
         emitTime(force: true)
@@ -323,8 +331,12 @@ final class MPVEngine: PlaybackEngine {
 
     private func resumeRestartWaiters() {
         let waiting = restartWaiters
-        restartWaiters = []
-        waiting.forEach { $0.resume() }
+        restartWaiters = [:]
+        waiting.values.forEach { $0.resume() }
+    }
+
+    private func resumeRestartWaiter(_ seek: Int) {
+        restartWaiters.removeValue(forKey: seek)?.resume()
     }
 
     func step(frames: Int) {

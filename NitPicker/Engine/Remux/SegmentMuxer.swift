@@ -8,7 +8,8 @@ import Foundation
 /// Segment 0 also provides the init segment that every segment shares. The muxer rebases each run to zero, so the
 /// fragments' `tfdt` is rewritten to the segment's real place on the timeline, measured against that shared init.
 ///
-/// libavformat contexts are not thread-safe, so everything runs on one serial queue.
+/// libavformat contexts are not thread-safe, so everything runs on one serial queue. `close` doesn't wait for it: it interrupts the
+/// read in progress and lets the queue finish, so the main thread never waits on a cut.
 final class SegmentMuxer: @unchecked Sendable {
     enum Failure: Error, Equatable, LocalizedError {
         case cannotOpen(String)
@@ -25,6 +26,10 @@ final class SegmentMuxer: @unchecked Sendable {
     let initSegment: [UInt8]
 
     private let queue = DispatchQueue(label: "nitpicker.segment-muxer", qos: .userInitiated)
+    /// Raised by `close`; libavformat polls it during reads.
+    private let interrupt = FFmpegInput.Interrupt()
+    /// For tests: the serial queue every cut runs on.
+    var queueForTesting: DispatchQueue { queue }
     private let segments: [SegmentSpec]
     private let videoIndex: Int
     private let audioIndex: Int?
@@ -54,13 +59,20 @@ final class SegmentMuxer: @unchecked Sendable {
         audioIndex = audio?.id
         origin = first.start.seconds
 
-        var opened: UnsafeMutablePointer<AVFormatContext>?
-        var code = avformat_open_input(&opened, path, nil, nil)
-        guard code >= 0, let context = opened else { throw Failure.cannotOpen(Self.message(code)) }
-        code = avformat_find_stream_info(context, nil)
+        let context: UnsafeMutablePointer<AVFormatContext>
+        do { context = try FFmpegInput.open(path: path, formats: FFmpegInput.remuxFormats, interrupt: interrupt) } catch {
+            throw Failure.cannotOpen(Self.message(error.code))
+        }
+        var opened: UnsafeMutablePointer<AVFormatContext>? = context
+        let code = avformat_find_stream_info(context, nil)
         guard code >= 0 else {
             avformat_close_input(&opened)
             throw Failure.cannotOpen(Self.message(code))
+        }
+        // The streams are the probe's; a file that changed since then may not have them.
+        guard video.id < Int(context.pointee.nb_streams), (audio?.id ?? 0) < Int(context.pointee.nb_streams) else {
+            avformat_close_input(&opened)
+            throw Failure.cannotOpen("the file changed while it was being opened")
         }
         for index in 0..<Int(context.pointee.nb_streams) where index != video.id && index != audio?.id {
             context.pointee.streams[index]?.pointee.discard = AVDISCARD_ALL
@@ -97,8 +109,10 @@ final class SegmentMuxer: @unchecked Sendable {
         if input != nil { avformat_close_input(&input) }
     }
 
+    /// Returns at once. A cut in progress is interrupted and fails; requests still queued find the file closed.
     func close() {
-        queue.sync {
+        interrupt.raise()
+        queue.async { [self] in
             if input != nil { avformat_close_input(&input) }
             transcoder?.close()
             transcoder = nil
@@ -124,10 +138,12 @@ final class SegmentMuxer: @unchecked Sendable {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 continuation.resume(with: Result {
-                    guard let input else { throw Failure.cannotCut("the file was closed") }
+                    guard let input, !interrupt.isRaised else { throw Failure.cannotCut("the file was closed") }
                     let length = Duration.milliseconds(600)
                     let spec = SegmentSpec(index: 0, start: keyframe, end: keyframe + length, duration: length)
-                    return Data(try Self.cut(spec, from: input, videoIndex: videoIndex, audioIndex: nil, transcoder: nil).bytes)
+                    let bytes = try Self.cut(spec, from: input, videoIndex: videoIndex, audioIndex: nil, transcoder: nil).bytes
+                    guard !interrupt.isRaised else { throw Failure.cannotCut("the file was closed") }
+                    return Data(bytes)
                 })
             }
         }
@@ -139,9 +155,11 @@ final class SegmentMuxer: @unchecked Sendable {
             cacheOrder.append(index)
             return hit
         }
-        guard let input else { throw Failure.cannotCut("the file was closed") }
+        guard let input, !interrupt.isRaised else { throw Failure.cannotCut("the file was closed") }
         let spec = segments[index]
         let cut = try Self.cut(spec, from: input, videoIndex: videoIndex, audioIndex: audioIndex, transcoder: transcoder)
+        // An interrupted read ends the cut early; what it made is incomplete.
+        guard !interrupt.isRaised else { throw Failure.cannotCut("the file was closed") }
         let raw = cut.bytes
         guard let firstFragment = MP4Boxes.children(of: raw).first(where: { $0.type == "moof" }) else {
             throw Failure.cannotCut("segment \(index) is empty")
@@ -177,10 +195,12 @@ final class SegmentMuxer: @unchecked Sendable {
         let start = spec.start.seconds
         let end = spec.end?.seconds
         let videoStream = input.pointee.streams[videoIndex]!
+        let timeBase = videoStream.pointee.time_base
+        guard timeBase.num > 0, timeBase.den > 0 else { throw Failure.cannotCut("the video has no usable time base") }
         // Converted audio carries on from the previous segment when this one follows it; after a jump it starts cold.
         if let transcoder, transcoder.resumeTime != spec.start { transcoder.reset() }
         // Half a millisecond past the keyframe, so seeking backwards lands on it and not on the one before.
-        let seekTarget = Int64((start + 0.0005) / av_q2d(videoStream.pointee.time_base))
+        let seekTarget = Int64((start + 0.0005) / av_q2d(timeBase))
         guard av_seek_frame(input, Int32(videoIndex), seekTarget, AVSEEK_FLAG_BACKWARD) >= 0 else { throw Failure.cannotCut("seeking failed") }
 
         var outputRef: UnsafeMutablePointer<AVFormatContext>?
@@ -320,9 +340,5 @@ final class SegmentMuxer: @unchecked Sendable {
         text.utf8.prefix(4).enumerated().reduce(0) { $0 | UInt32($1.element) << (8 * UInt32($1.offset)) }
     }
 
-    private static func message(_ code: Int32) -> String {
-        var buffer = [CChar](repeating: 0, count: 256)
-        av_strerror(code, &buffer, buffer.count)
-        return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
-    }
+    private static func message(_ code: Int32) -> String { FFmpegInput.message(code) }
 }

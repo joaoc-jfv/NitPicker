@@ -94,6 +94,22 @@ private struct Clip {
             _ = try await SegmentMuxer.open(path: "/definitely/not/here.mkv", video: video, audio: nil, segments: segments)
         }
     }
+
+    @Test func closingDoesNotWaitForACutAndLaterRequestsFail() async throws {
+        let clip = try await Clip(seconds: 8)
+        defer { clip.cleanUp() }
+        let probe = try await MKVProbe.probe(url: clip.mkv)
+        let segments = SegmentPlanner.plan(keyframes: probe.keyframes, duration: probe.duration, target: .seconds(3))
+        let muxer = try await SegmentMuxer.open(path: clip.mkv.path, video: probe.video[0], audio: probe.audio[0], segments: segments)
+        // Stands in for a long cut (a slow disk, audio being converted): the queue is busy for a while.
+        muxer.queueForTesting.async { Thread.sleep(forTimeInterval: 0.3) }
+        let started = ContinuousClock.now
+        muxer.close()
+        let took = ContinuousClock.now - started
+        #expect(took < .milliseconds(100), "close returns without waiting for the queue (took \(took))")
+        await #expect(throws: SegmentMuxer.Failure.self) { _ = try await muxer.segment(1) }
+        await #expect(throws: SegmentMuxer.Failure.self) { _ = try await muxer.stillClip(at: .zero) }
+    }
 }
 
 @MainActor

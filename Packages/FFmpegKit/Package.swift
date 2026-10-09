@@ -14,7 +14,8 @@ let package = Package(
         .library(name: "FFmpegKit", targets: ["FFmpegKit"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/mpvkit/MPVKit.git", exact: "1.1.0-n9.0.2"),
+        // The commit tagged 1.1.0-n9.0.2, by hash: a tag can be moved, and these libraries parse every file the app opens.
+        .package(url: "https://github.com/mpvkit/MPVKit.git", revision: "98c3453e252922e3136422da3fbb2e341ed9edc8"),
     ],
     targets: [
         .target(

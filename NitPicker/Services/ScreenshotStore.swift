@@ -24,14 +24,18 @@ final class ScreenshotStore {
     func save(_ output: ScreenshotEncoder.Output, title: String, at time: Duration) throws -> URL {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let base = "\(Self.safeName(title)) \(Self.timeStamp(time))"
-        var target = directory.appendingPathComponent(base).appendingPathExtension(output.fileExtension)
-        var number = 2
-        while FileManager.default.fileExists(atPath: target.path) {
-            target = directory.appendingPathComponent("\(base) \(number)").appendingPathExtension(output.fileExtension)
-            number += 1
+        var number = 1
+        while true {
+            let name = number == 1 ? base : "\(base) \(number)"
+            let target = directory.appendingPathComponent(name).appendingPathExtension(output.fileExtension)
+            do {
+                // Refuses to replace a file, so two screenshots of one moment can't overwrite each other.
+                try output.data.write(to: target, options: .withoutOverwriting)
+                return target
+            } catch CocoaError.fileWriteFileExists {
+                number += 1
+            }
         }
-        try output.data.write(to: target, options: .atomic)
-        return target
     }
 
     /// `1-02-03` for an hour, two minutes and three seconds in; `12-34` under an hour.
@@ -41,13 +45,19 @@ final class ScreenshotStore {
         return hours > 0 ? String(format: "%d-%02d-%02d", hours, minutes, seconds) : String(format: "%d-%02d", minutes, seconds)
     }
 
+    /// A file name may be 255 bytes; this leaves room for the time, a number and the extension.
+    nonisolated static let maximumNameBytes = 200
+
     /// A title made safe for a file name, and short.
     nonisolated static func safeName(_ title: String) -> String {
         let cleaned = title
             .components(separatedBy: CharacterSet(charactersIn: "/:\\\0\n\r\t")).joined(separator: " ")
             .split(whereSeparator: \.isWhitespace).joined(separator: " ")
             .trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: ".")))
-        let short = cleaned.count > 80 ? String(cleaned.prefix(80)).trimmingCharacters(in: .whitespaces) : cleaned
+        var short = cleaned.count > 80 ? String(cleaned.prefix(80)) : cleaned
+        // Eighty characters can be far more bytes (emoji, scripts outside Latin); drop whole characters until it fits.
+        while short.utf8.count > maximumNameBytes { short.removeLast() }
+        short = short.trimmingCharacters(in: .whitespaces)
         return short.isEmpty ? "Screenshot" : short
     }
 }

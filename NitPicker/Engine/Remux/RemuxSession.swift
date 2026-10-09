@@ -69,7 +69,7 @@ final class RemuxSession: @unchecked Sendable {
                 case "video.m3u8": return HTTPResource(body: media, contentType: "application/vnd.apple.mpegurl")
                 case "init.mp4": return HTTPResource(body: initData, contentType: "video/mp4")
                 default:
-                    guard path.hasPrefix("seg_"), path.hasSuffix(".m4s"), let index = Int(path.dropFirst(4).dropLast(4)), index < count else { return nil }
+                    guard path.hasPrefix("seg_"), path.hasSuffix(".m4s"), let index = Int(path.dropFirst(4).dropLast(4)), (0..<count).contains(index) else { return nil }
                     do {
                         return HTTPResource(body: try await muxer.segment(index), contentType: "video/iso.segment")
                     } catch {

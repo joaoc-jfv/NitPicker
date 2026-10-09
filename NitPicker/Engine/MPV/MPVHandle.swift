@@ -1,5 +1,6 @@
 import FFmpegKit
 import Foundation
+import OSLog
 
 /// What the mpv thread tells the engine. Property values are read afresh by the engine when it hears a name; mpv's getters
 /// are thread-safe.
@@ -50,6 +51,7 @@ final class MPVHandle: @unchecked Sendable {
             handle = nil
             throw Failure(message: "The compatibility player couldn't start (\(Self.message(code))).")
         }
+        // The loop keeps the handle alive while it runs, so `deinit` can't be what ends it: `destroy` is.
         let loop = Thread { [weak self] in self?.runEvents() }
         loop.name = "nitpicker.mpv-events"
         loop.qualityOfService = .userInitiated
@@ -68,13 +70,19 @@ final class MPVHandle: @unchecked Sendable {
         guard !isDestroying, let current = handle else { lock.unlock(); return }
         isDestroying = true
         lock.unlock()
-        // `quit` ends the core and the event thread with it; only then is it safe to free the handle.
         _ = command(["quit"])
-        _ = eventThreadDone.wait(timeout: .now() + 3)
+        // With the handle gone the event thread stops at its next turn; the wakeup makes that turn now. Only once the thread
+        // has returned is it safe to free the handle, which it may be waiting on.
         lock.lock()
         handle = nil
         lock.unlock()
-        mpv_terminate_destroy(current)
+        mpv_wakeup(current)
+        if eventThreadDone.wait(timeout: .now() + 10) == .timedOut {
+            // Freeing it now could pull it out from under the thread: leaking one instance is the lesser harm.
+            Self.log.error("mpv's event thread didn't stop; leaving the instance alive")
+        } else {
+            mpv_terminate_destroy(current)
+        }
         continuation.finish()
     }
 
@@ -228,10 +236,13 @@ final class MPVHandle: @unchecked Sendable {
                 default: break
                 }
             }
-            guard let bytes, width > 0, height > 0 else { return nil }
+            // The picture is read as rows of `stride` bytes, so the buffer must really hold them.
+            guard let bytes, width > 0, height > 0, stride >= width * 4, bytes.count >= stride * height else { return nil }
             return RawFrame(width: width, height: height, stride: stride, bytes: bytes)
         } ?? nil
     }
+
+    private static let log = Logger(subsystem: "com.joaocadide.nitpicker", category: "mpv")
 
     static func message(_ code: Int32) -> String {
         String(cString: mpv_error_string(code))

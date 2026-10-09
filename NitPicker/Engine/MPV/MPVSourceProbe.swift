@@ -5,8 +5,8 @@ import Foundation
 enum MPVSourceProbe {
     /// The HDR format of the file's first video stream, with the Dolby Vision profile its configuration record carries.
     static func hdrFormat(atPath path: String) -> HDRFormat? {
-        var input: UnsafeMutablePointer<AVFormatContext>?
-        guard avformat_open_input(&input, path, nil, nil) >= 0, let context = input else { return nil }
+        guard let context = try? FFmpegInput.open(path: path) else { return nil }
+        var input: UnsafeMutablePointer<AVFormatContext>? = context
         defer { avformat_close_input(&input) }
         guard avformat_find_stream_info(context, nil) >= 0 else { return nil }
         let index = av_find_best_stream(context, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)

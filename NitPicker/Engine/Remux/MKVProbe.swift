@@ -67,11 +67,10 @@ enum MKVProbe {
     }
 
     static func probe(path: String) throws -> MKVProbeResult {
-        var opened: UnsafeMutablePointer<AVFormatContext>?
-        var code = avformat_open_input(&opened, path, nil, nil)
-        guard code >= 0, let context = opened else { throw Failure.cannotOpen(message(for: code)) }
+        let context = try open(path)
+        var opened: UnsafeMutablePointer<AVFormatContext>? = context
         defer { avformat_close_input(&opened) }
-        code = avformat_find_stream_info(context, nil)
+        let code = avformat_find_stream_info(context, nil)
         guard code >= 0 else { throw Failure.cannotOpen(message(for: code)) }
         guard context.pointee.nb_streams > 0 else { throw Failure.noStreams }
 
@@ -151,7 +150,7 @@ enum MKVProbe {
         var result: [Chapter] = []
         for index in 0..<Int(context.pointee.nb_chapters) {
             guard let chapter = context.pointee.chapters[index] else { continue }
-            let seconds = Double(chapter.pointee.start) * av_q2d(chapter.pointee.time_base)
+            guard let seconds = FFmpegTimestamp.seconds(chapter.pointee.start, timeBase: chapter.pointee.time_base) else { continue }
             let title = metadata(chapter.pointee.metadata, "title")
             result.append(Chapter(id: result.count, title: title ?? "Chapter \(result.count + 1)", start: .seconds(max(0, seconds))))
         }
@@ -162,11 +161,12 @@ enum MKVProbe {
     private static func keyframes(of context: UnsafeMutablePointer<AVFormatContext>, videoIndex: Int) -> [Duration] {
         _ = av_seek_frame(context, Int32(videoIndex), 0, AVSEEK_FLAG_BACKWARD)
         guard let stream = context.pointee.streams[videoIndex] else { return [] }
-        let timeBase = av_q2d(stream.pointee.time_base)
         var times: [Double] = []
         for index in 0..<avformat_index_get_entries_count(stream) {
-            guard let entry = avformat_index_get_entry(stream, index), entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0 else { continue }
-            times.append(Double(entry.pointee.timestamp) * timeBase)
+            guard let entry = avformat_index_get_entry(stream, index), entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0,
+                  let time = FFmpegTimestamp.seconds(entry.pointee.timestamp, timeBase: stream.pointee.time_base)
+            else { continue }
+            times.append(time)
         }
         var seen = Set<Int64>()
         return times.sorted().filter { seen.insert(Int64(($0 * 1000).rounded())).inserted }.map { .seconds(max(0, $0)) }
@@ -180,23 +180,21 @@ enum MKVProbe {
     }
 
     static func scanKeyframes(path: String, videoIndex: Int) throws -> [Duration] {
-        var opened: UnsafeMutablePointer<AVFormatContext>?
-        let code = avformat_open_input(&opened, path, nil, nil)
-        guard code >= 0, let context = opened else { throw Failure.cannotOpen(message(for: code)) }
+        let context = try open(path)
+        var opened: UnsafeMutablePointer<AVFormatContext>? = context
         defer { avformat_close_input(&opened) }
         guard videoIndex < Int(context.pointee.nb_streams), let video = context.pointee.streams[videoIndex] else { return [] }
         for index in 0..<Int(context.pointee.nb_streams) where index != videoIndex { context.pointee.streams[index]?.pointee.discard = AVDISCARD_ALL }
         guard let packet = av_packet_alloc() else { return [] }
         defer { var owned: UnsafeMutablePointer<AVPacket>? = packet; av_packet_free(&owned) }
 
-        let timeBase = av_q2d(video.pointee.time_base)
         var times: [Double] = []
         while av_read_frame(context, packet) >= 0 {
             defer { av_packet_unref(packet) }
             if Task.isCancelled { throw CancellationError() }
             guard Int(packet.pointee.stream_index) == videoIndex, packet.pointee.flags & AV_PKT_FLAG_KEY != 0 else { continue }
             let stamp = packet.pointee.pts != Int64.min ? packet.pointee.pts : packet.pointee.dts
-            if stamp != Int64.min { times.append(Double(stamp) * timeBase) }
+            if let time = FFmpegTimestamp.seconds(stamp, timeBase: video.pointee.time_base) { times.append(time) }
         }
         var seen = Set<Int64>()
         return times.sorted().filter { seen.insert(Int64(($0 * 1000).rounded())).inserted }.map { .seconds(max(0, $0)) }
@@ -224,9 +222,14 @@ enum MKVProbe {
         return name == "unknown" || name == "unspecified" ? nil : name
     }
 
-    private static func message(for code: Int32) -> String {
-        var buffer = [CChar](repeating: 0, count: 256)
-        av_strerror(code, &buffer, buffer.count)
-        return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+    /// Opens `path` for reading: a local file, in one of the containers the remuxer handles.
+    static func open(_ path: String) throws -> UnsafeMutablePointer<AVFormatContext> {
+        do {
+            return try FFmpegInput.open(path: path, formats: FFmpegInput.remuxFormats)
+        } catch {
+            throw Failure.cannotOpen(message(for: error.code))
+        }
     }
+
+    static func message(for code: Int32) -> String { FFmpegInput.message(code) }
 }
