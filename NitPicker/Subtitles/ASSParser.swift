@@ -27,7 +27,9 @@ enum ASSParser {
     private static func cue(fromDialogue body: String, fields: [String]) -> SubtitleCue? {
         let fields = fields.isEmpty ? ["layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect", "text"] : fields
         guard let startIndex = fields.firstIndex(of: "start"), let endIndex = fields.firstIndex(of: "end"),
-              let textIndex = fields.firstIndex(of: "text") else { return nil }
+              let textIndex = fields.firstIndex(of: "text"),
+              // Only the fields before the text are split off, so a format that puts the times after it can't be read.
+              startIndex < textIndex, endIndex < textIndex else { return nil }
         // The text is last and may hold commas, so only the fields before it are split off.
         let parts = body.split(separator: ",", maxSplits: textIndex, omittingEmptySubsequences: false)
         guard parts.count == textIndex + 1,

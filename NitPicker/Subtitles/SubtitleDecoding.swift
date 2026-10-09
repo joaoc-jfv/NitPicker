@@ -40,7 +40,8 @@ enum SubtitleTimestamp {
         guard secondsParts.count <= 2, let wholeSeconds = Int(secondsParts[0]),
               let minutes = Int(parts[parts.count - 2]),
               let hours = parts.count == 3 ? Int(parts[0]) : 0,
-              minutes < 60, wholeSeconds < 60, hours >= 0, minutes >= 0, wholeSeconds >= 0
+              // The hours bound keeps `hours * 3600` from overflowing on a crafted file.
+              minutes < 60, wholeSeconds < 60, hours >= 0, hours < 100_000, minutes >= 0, wholeSeconds >= 0
         else { return nil }
         var fraction = 0.0
         if secondsParts.count == 2 {
